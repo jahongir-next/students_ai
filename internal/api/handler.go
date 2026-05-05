@@ -1,18 +1,29 @@
 package api
 
 import (
+	openai "chdpu-ai-monitor/cmd/api"
 	"chdpu-ai-monitor/internal/ai"
+	"context"
 	_ "context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/qdrant/go-client/qdrant"
 )
+
+type Handler struct {
+	OpenAI *openai.Client
+	Logger *log.Logger
+	Qdrant *qdrant.Client
+}
 
 type AskRequest struct {
 	Question string `json:"question"`
@@ -155,4 +166,125 @@ func VoiceAskHandler(qClient *qdrant.Client) httprouter.Handle {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"question": "%s", "answer": "%s"}`, transcribedText, answer)
 	}
+}
+
+func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+
+	// --- validation ---
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var input struct {
+		Prompt string `json:"prompt"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	if input.Prompt == "" {
+		http.Error(w, "Prompt is required", http.StatusBadRequest)
+		return
+	}
+
+	// --- STREAM HEADERS ---
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	fmt.Fprintf(w, "event: start\ndata: {\"status\":\"processing\"}\n\n")
+	flusher.Flush()
+
+	// =========================================================
+	// 🔥 1. EMBEDDING
+	// =========================================================
+	apiKey := os.Getenv("OPENAI_API_KEY")
+
+	queryVector, err := ai.GetEmbedding(ctx, apiKey, input.Prompt)
+	if err != nil {
+		sendStreamError(w, flusher, "Embedding error")
+		return
+	}
+
+	// =========================================================
+	// 🔥 2. QDRANT SEARCH
+	// =========================================================
+	searchRes, err := h.Qdrant.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: "students_llm",
+		Query:          qdrant.NewQuery(queryVector...),
+		Limit:          qdrant.PtrOf(uint64(10)),
+		WithPayload:    qdrant.NewWithPayload(true),
+	})
+	if err != nil {
+		sendStreamError(w, flusher, "Qdrant search error")
+		return
+	}
+
+	// =========================================================
+	// 🔥 3. CONTEXT YIG‘ISH
+	// =========================================================
+	var contextText strings.Builder
+
+	for _, hit := range searchRes {
+		if val, ok := hit.Payload["text_context"]; ok {
+			if strVal := val.GetStringValue(); strVal != "" {
+				contextText.WriteString(strVal)
+				contextText.WriteString("\n")
+			}
+		}
+	}
+
+	// =========================================================
+	// 🔥 4. FINAL PROMPT (RAG)
+	// =========================================================
+	finalPrompt := fmt.Sprintf(
+		"Quyidagi ma'lumotlarga asoslanib javob ber:\n\nKONTEKST:\n%s\n\nSAVOL: %s",
+		contextText.String(),
+		input.Prompt,
+	)
+
+	fmt.Fprintf(w, "event: start\ndata: {\"status\":\"streaming\"}\n\n")
+	flusher.Flush()
+
+	// =========================================================
+	// 🔥 5. STREAM OPENAI
+	// =========================================================
+	err = h.OpenAI.GetChatResponseStream(ctx, finalPrompt, func(chunk string) {
+
+		data := map[string]string{"content": chunk}
+		jsonData, _ := json.Marshal(data)
+
+		fmt.Fprintf(w, "data: %s\n\n", jsonData)
+		flusher.Flush()
+	})
+
+	if err != nil {
+		sendStreamError(w, flusher, "Stream error occurred")
+		return
+	}
+
+	fmt.Fprintf(w, "event: done\ndata: {\"status\":\"completed\"}\n\n")
+	flusher.Flush()
+}
+
+func sendStreamError(w http.ResponseWriter, flusher http.Flusher, msg string) {
+	data := map[string]string{"error": msg}
+	jsonData, _ := json.Marshal(data)
+
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", jsonData)
+	flusher.Flush()
 }
