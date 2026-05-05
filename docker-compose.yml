@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: student_db
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: student_llm
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  migrate:
+    image: migrate/migrate
+    container_name: student_migrate
+    volumes:
+      - ./migrations:/migrations
+    command:
+      - -path=/migrations/
+      - -database=postgres://user:password@db:5432/student_llm?sslmode=disable
+      - up
+    depends_on:
+      - db
+
+  qdrant:
+    image: qdrant/qdrant
+    container_name: student_qdrant
+    restart: always
+    ports:
+      - "6333:6333" # HTTP API (Dashboard va so'rovlar uchun)
+      - "6334:6334" # gRPC API (Go client ulanishi uchun)
+    volumes:
+      - qdrant_data:/qdrant/storage:z
+
+volumes:
+  postgres_data:
+  qdrant_data:

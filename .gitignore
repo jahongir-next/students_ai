@@ -1,0 +1,16 @@
+
+bin/
+main
+
+.env
+
+storage/logs/
+qdrant_storage/
+postgres_data/
+*.log
+
+
+vendor/
+
+.idea/
+.vscode/
