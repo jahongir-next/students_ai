@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chdpu-ai-monitor/cmd/cmd"
 	"chdpu-ai-monitor/internal/api"
 	"chdpu-ai-monitor/internal/qdrant"
 	"log"
@@ -12,6 +13,8 @@ import (
 
 func main() {
 	godotenv.Load()
+
+	cmd.Execute()
 
 	qClient, err := qdrant.InitClient()
 	if err != nil {
