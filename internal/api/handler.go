@@ -5,8 +5,10 @@ import (
 	_ "context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/qdrant/go-client/qdrant"
@@ -41,7 +43,7 @@ func AskHandler(qClient *qdrant.Client) httprouter.Handle {
 		searchRes, err := qClient.Query(r.Context(), &qdrant.QueryPoints{
 			CollectionName: "students_llm",
 			Query:          qdrant.NewQuery(queryVector...),
-			Limit:          qdrant.PtrOf(uint64(50)), // Eng yaqin 500 ta ma'lumot
+			Limit:          qdrant.PtrOf(uint64(10)),
 			WithPayload:    qdrant.NewWithPayload(true),
 		})
 		if err != nil {
@@ -80,5 +82,77 @@ func AskHandler(qClient *qdrant.Client) httprouter.Handle {
 		// 5. Javobni qaytarish
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(AskResponse{Answer: answer})
+	}
+}
+
+func VoiceAskHandler(qClient *qdrant.Client) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		apiKey := os.Getenv("OPENAI_API_KEY")
+
+		// 1. Audio faylni qabul qilish (multipart/form-data)
+		file, header, err := r.FormFile("audio")
+		if err != nil {
+			http.Error(w, "Audio fayl topilmadi", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// 2. Vaqtinchalik fayl yaratish
+		tempDir := "storage/temp"
+		os.MkdirAll(tempDir, os.ModePerm)
+		tempFile := filepath.Join(tempDir, header.Filename)
+
+		f, err := os.Create(tempFile)
+		if err != nil {
+			http.Error(w, "Faylni saqlashda xato", http.StatusInternalServerError)
+			return
+		}
+		io.Copy(f, file)
+		f.Close()
+		defer os.Remove(tempFile) // Ish bitgach o'chirish
+
+		// 3. Whisper orqali matnga aylantirish (STT)
+		// Eslatma: ai.AudioToText funksiyasini yuqorida gaplashganimizdek yaratib olishingiz kerak
+		transcribedText, err := ai.AudioToText(apiKey, tempFile)
+		fmt.Println(transcribedText)
+		if err != nil {
+			http.Error(w, "Ovozni matnga aylantirishda xato: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// 4. Endi matn tayyor, uni mavjud RAG jarayoniga yo'naltiramiz
+		// Bu qismi sizning AskHandler kodingiz bilan deyarli bir xil bo'ladi
+
+		// a. Embed qilish (Savolni vektorga aylantirish)
+		queryVector, err := ai.GetEmbedding(r.Context(), apiKey, transcribedText)
+		if err != nil {
+			http.Error(w, "Embedding xatosi", http.StatusInternalServerError)
+			return
+		}
+
+		// b. Qdrantdan qidirish
+		searchRes, err := qClient.Query(r.Context(), &qdrant.QueryPoints{
+			CollectionName: "students_llm",
+			Query:          qdrant.NewQuery(queryVector...),
+			Limit:          qdrant.PtrOf(uint64(10)),
+			WithPayload:    qdrant.NewWithPayload(true),
+		})
+
+		// 3. Topilgan ma'lumotlardan kontekst yig'ish
+		contextText := ""
+		for _, hit := range searchRes {
+			if val, ok := hit.Payload["text_context"]; ok {
+				if strVal := val.GetStringValue(); strVal != "" {
+					contextText += strVal + "\n"
+				}
+			}
+		}
+
+		prompt := fmt.Sprintf("Kontekst:\n%s\n\nSavol: %s", contextText, transcribedText)
+		answer, err := ai.GetChatResponse(r.Context(), apiKey, prompt)
+
+		// 5. Natijani qaytarish
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"question": "%s", "answer": "%s"}`, transcribedText, answer)
 	}
 }

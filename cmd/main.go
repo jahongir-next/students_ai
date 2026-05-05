@@ -25,6 +25,7 @@ func main() {
 	router := httprouter.New()
 
 	router.POST("/api/ask", api.AskHandler(qClient))
+	router.POST("/api/ask-voice", api.VoiceAskHandler(qClient))
 
 	log.Println("Server 8085 portida ishlamoqda...")
 	log.Fatal(http.ListenAndServe(":8085", router))

@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
 )
 
 type ChatRequest struct {
@@ -80,4 +83,65 @@ func GetChatResponse(ctx context.Context, apiKey string, prompt string) (string,
 	}
 
 	return "", fmt.Errorf("OpenAI'dan bo'sh javob qaytdi")
+}
+
+func AudioToText(apiKey string, filePath string) (string, error) {
+	url := "https://api.openai.com/v1/audio/transcriptions"
+
+	// 1. Faylni ochish
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("faylni ochishda xato: %v", err)
+	}
+	defer file.Close()
+
+	// 2. Multipart form yaratish
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	part, err := writer.CreateFormFile("file", filePath)
+	if err != nil {
+		return "", fmt.Errorf("form file yaratishda xato: %v", err)
+	}
+	_, err = io.Copy(part, file)
+	if err != nil {
+		return "", fmt.Errorf("faylni nusxalashda xato: %v", err)
+	}
+
+	_ = writer.WriteField("model", "whisper-1")
+	//_ = writer.WriteField("language", "uz")
+	writer.Close()
+
+	// 3. Request yuborish
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return "", fmt.Errorf("request yaratishda xato: %v", err)
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("so'rov yuborishda xato: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Xatolikni tekshirish (StatusCode 200 bo'lmasa)
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("OpenAI API xatosi (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// 4. Natijani DECODE qilish (Sizda shu qism tushib qolgan edi)
+	var result struct {
+		Text string `json:"text"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("JSON decode xatosi: %v", err)
+	}
+
+	return result.Text, nil
 }
