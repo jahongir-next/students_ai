@@ -67,7 +67,7 @@ func (c *Client) GetChatResponse(ctx context.Context, prompt string) (string, er
 		Messages: []message{
 			{
 				Role:    "system",
-				Content: "Sen talabalar monitoringi bo'yicha yordamchi AI assistentsan.",
+				Content: "Sen CHDPU universiteti uchun maxsus yaratilgan AI yordamchisan. Sening vazifang faqat universitet, darslar, davomat va akademik monitoring bo'yicha savollarga javob berish. Agar foydalanuvchi universitetga aloqasi bo'lmagan (masalan, geografiya, umumiy bilim, ovqat pishirish va h.k.) savol bersa, muloyimlik bilan: 'Kechirasiz, men faqat universitet tizimi va akademik monitoring masalalari bo'yicha yordam berish uchun mo'ljallanganman' deb javob ber.",
 			},
 			{
 				Role:    "user",
@@ -104,7 +104,7 @@ func (c *Client) GetChatResponseStream(ctx context.Context, prompt string, onChu
 		Messages: []message{
 			{
 				Role:    "system",
-				Content: "Sen talabalar monitoringi bo'yicha yordamchi AI assistentsan.",
+				Content: "Sen CHDPU universiteti uchun maxsus yaratilgan AI yordamchisan. Sening vazifang faqat universitet, darslar, davomat va akademik monitoring bo'yicha savollarga javob berish. Agar foydalanuvchi universitetga aloqasi bo'lmagan (masalan, geografiya, umumiy bilim, ovqat pishirish va h.k.) savol bersa, muloyimlik bilan: 'Kechirasiz, men faqat universitet tizimi va akademik monitoring masalalari bo'yicha yordam berish uchun mo'ljallanganman' deb javob ber.",
 			},
 			{
 				Role:    "user",
