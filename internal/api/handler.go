@@ -5,6 +5,7 @@ import (
 	"chdpu-ai-monitor/internal/ai"
 	"context"
 	_ "context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,9 +21,10 @@ import (
 )
 
 type Handler struct {
-	OpenAI *openai.Client
-	Logger *log.Logger
-	Qdrant *qdrant.Client
+	OpenAI      *openai.Client
+	Logger      *log.Logger
+	Qdrant      *qdrant.Client
+	SessionRepo *openai.SessionRepository
 }
 
 type AskRequest struct {
@@ -54,7 +56,7 @@ func AskHandler(qClient *qdrant.Client) httprouter.Handle {
 		searchRes, err := qClient.Query(r.Context(), &qdrant.QueryPoints{
 			CollectionName: "students_llm",
 			Query:          qdrant.NewQuery(queryVector...),
-			Limit:          qdrant.PtrOf(uint64(10)),
+			Limit:          qdrant.PtrOf(uint64(30)),
 			WithPayload:    qdrant.NewWithPayload(true),
 		})
 		if err != nil {
@@ -145,7 +147,7 @@ func VoiceAskHandler(qClient *qdrant.Client) httprouter.Handle {
 		searchRes, err := qClient.Query(r.Context(), &qdrant.QueryPoints{
 			CollectionName: "students_llm",
 			Query:          qdrant.NewQuery(queryVector...),
-			Limit:          qdrant.PtrOf(uint64(10)),
+			Limit:          qdrant.PtrOf(uint64(30)),
 			WithPayload:    qdrant.NewWithPayload(true),
 		})
 
@@ -168,8 +170,105 @@ func VoiceAskHandler(qClient *qdrant.Client) httprouter.Handle {
 	}
 }
 
-func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+// CreateSessionHandler yangi session yaratadi
+func (h *Handler) CreateSessionHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
+	var input struct {
+		UserID string `json:"user_id"` // optional
+		Title  string `json:"title"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	if input.Title == "" {
+		input.Title = "New Conversation"
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	session, err := h.SessionRepo.CreateSession(ctx, input.UserID, input.Title)
+	if err != nil {
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(session)
+}
+
+// GetSessionHandler sessionni oladi
+func (h *Handler) GetSessionHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	sessionID := params.ByName("id")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	sessionWithMessages, err := h.SessionRepo.GetSessionWithMessages(ctx, sessionID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Session not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Failed to get session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessionWithMessages)
+}
+
+// ListSessionsHandler user sessionlarini listlaydi
+func (h *Handler) ListSessionsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	userID := r.URL.Query().Get("user_id")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	sessions, err := h.SessionRepo.ListSessions(ctx, userID, 50)
+	if err != nil {
+		http.Error(w, "Failed to list sessions", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions)
+}
+
+// DeleteSessionHandler sessionni o'chiradi
+func (h *Handler) DeleteSessionHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	if r.Method != http.MethodDelete {
+		w.Header().Set("Allow", http.MethodDelete)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessionID := params.ByName("id")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if err := h.SessionRepo.DeleteSession(ctx, sessionID); err != nil {
+		http.Error(w, "Failed to delete session", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// =========================================================
+// 💬 YANGILANGAN CHAT STREAM (SESSION-AWARE)
+// =========================================================
+
+func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	// --- validation ---
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -178,7 +277,8 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	}
 
 	var input struct {
-		Prompt string `json:"prompt"`
+		SessionID string `json:"session_id"` // MUHIM: session ID
+		Prompt    string `json:"prompt"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -188,6 +288,11 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 
 	if input.Prompt == "" {
 		http.Error(w, "Prompt is required", http.StatusBadRequest)
+		return
+	}
+
+	if input.SessionID == "" {
+		http.Error(w, "Session ID is required", http.StatusBadRequest)
 		return
 	}
 
@@ -206,11 +311,38 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
+	// Sessionni tekshirish
+	session, err := h.SessionRepo.GetSession(ctx, input.SessionID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			sendStreamError(w, flusher, "Session not found")
+			return
+		}
+		sendStreamError(w, flusher, "Failed to validate session")
+		return
+	}
+
 	fmt.Fprintf(w, "event: start\ndata: {\"status\":\"processing\"}\n\n")
 	flusher.Flush()
 
+	// User messageini saqlash
+	_, err = h.SessionRepo.AddMessage(ctx, session.ID, "user", input.Prompt)
+	if err != nil {
+		sendStreamError(w, flusher, "Failed to save user message")
+		return
+	}
+
 	// =========================================================
-	// 🔥 1. EMBEDDING
+	// 🔥 1. CONVERSATION HISTORY OLISH
+	// =========================================================
+	messages, err := h.SessionRepo.GetMessages(ctx, session.ID)
+	if err != nil {
+		sendStreamError(w, flusher, "Failed to load conversation history")
+		return
+	}
+
+	// =========================================================
+	// 🔥 2. EMBEDDING
 	// =========================================================
 	apiKey := os.Getenv("OPENAI_API_KEY")
 
@@ -221,7 +353,7 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	}
 
 	// =========================================================
-	// 🔥 2. QDRANT SEARCH
+	// 🔥 3. QDRANT SEARCH
 	// =========================================================
 	searchRes, err := h.Qdrant.Query(ctx, &qdrant.QueryPoints{
 		CollectionName: "students_llm",
@@ -235,7 +367,7 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	}
 
 	// =========================================================
-	// 🔥 3. CONTEXT YIG‘ISH
+	// 🔥 4. CONTEXT YIG'ISH
 	// =========================================================
 	var contextText strings.Builder
 
@@ -249,11 +381,39 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	}
 
 	// =========================================================
-	// 🔥 4. FINAL PROMPT (RAG)
+	// 🔥 5. CONVERSATION HISTORY FORMATLASH
+	// =========================================================
+	var conversationHistory strings.Builder
+
+	// Oxirgi 5 ta message (context uchun, agar kerak bo'lsa)
+	startIdx := 0
+	if len(messages) > 5 {
+		startIdx = len(messages) - 5
+	}
+
+	for _, msg := range messages[startIdx:] {
+		role := "User"
+		if msg.Role == "assistant" {
+			role = "Assistant"
+		}
+		conversationHistory.WriteString(fmt.Sprintf("%s: %s\n", role, msg.Content))
+	}
+
+	// =========================================================
+	// 🔥 6. FINAL PROMPT (RAG + HISTORY)
 	// =========================================================
 	finalPrompt := fmt.Sprintf(
-		"Quyidagi ma'lumotlarga asoslanib javob ber:\n\nKONTEKST:\n%s\n\nSAVOL: %s",
+		`Quyidagi ma'lumotlarga va oldingi suhbatga asoslanib javob ber:
+ 
+KONTEKST (Ma'lumotlar bazasidan):
+%s
+ 
+OLDINGI SUHBAT:
+%s
+ 
+JORIY SAVOL: %s`,
 		contextText.String(),
+		conversationHistory.String(),
 		input.Prompt,
 	)
 
@@ -261,9 +421,12 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	flusher.Flush()
 
 	// =========================================================
-	// 🔥 5. STREAM OPENAI
+	// 🔥 7. STREAM OPENAI va JAVOBNI SAQLASH
 	// =========================================================
+	var fullResponse strings.Builder
+
 	err = h.OpenAI.GetChatResponseStream(ctx, finalPrompt, func(chunk string) {
+		fullResponse.WriteString(chunk)
 
 		data := map[string]string{"content": chunk}
 		jsonData, _ := json.Marshal(data)
@@ -275,6 +438,13 @@ func (h *Handler) ChatStreamHandler(w http.ResponseWriter, r *http.Request, para
 	if err != nil {
 		sendStreamError(w, flusher, "Stream error occurred")
 		return
+	}
+
+	// Assistant javobini saqlash
+	_, err = h.SessionRepo.AddMessage(ctx, session.ID, "assistant", fullResponse.String())
+	if err != nil {
+		// Log qilish, lekin streamga tasir qilmaslik
+		fmt.Printf("Warning: failed to save assistant message: %v\n", err)
 	}
 
 	fmt.Fprintf(w, "event: done\ndata: {\"status\":\"completed\"}\n\n")
