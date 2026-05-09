@@ -1,0 +1,2 @@
+ALTER TABLE teacher_attendance_logs
+DROP COLUMN is_embedded;
